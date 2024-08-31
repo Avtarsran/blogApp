@@ -30,8 +30,23 @@ const blogPostSchema = z.object({
   title: z.string().min(3, { message: "length of title should be atleast 3" }),
   userId: z.number(),
   body: z.string().min(3),
-  tags: z.array(z.string()),
+  tags: z.array(z.string()).refine((arr) => unique(arr), {
+    message: "Array items must be unique",
+  }),
 });
+
+function unique(arr: string[]): boolean {
+  let str = "";
+  let array = arr.sort();
+  for (let i = 0; i < array.length; i++) {
+    if (str !== array[i]) {
+      str = array[i];
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
 const updateBlogPostSchema = z.object({
   title: z
@@ -39,7 +54,9 @@ const updateBlogPostSchema = z.object({
     .min(3, { message: "length of title should be atleast 3" })
     .optional(),
   body: z.string().min(3).optional(),
-  tags: z.array(z.string()).optional(),
+  tags: z.array(z.string()).refine((arr) => unique(arr), {
+    message: "Array items must be unique",
+  }),
 });
 
 enum Status {
@@ -172,28 +189,40 @@ app.post("/posts", userMiddleware, async (c) => {
   }
   const { userId, title, body, tags } = formBody;
   try {
-    const transactionResult = await prisma.$transaction(async (prisma) => {
+    const createBlogPost: Object = await prisma.$transaction(async () => {
       const blog = await prisma.blog.create({
         data: {
           userId,
           title,
           body,
-          tag: {
-            create: {
-              tag: tags,
-            },
-          },
         },
         include: {
           tag: true,
         },
       });
 
+      const createTags = tags.map(async (name: string) => {
+        await prisma.tags.upsert({
+          where:{tag:name},
+          update: {blogs:{
+            connect: {id:blog.id}
+          }},
+          create: {
+            tag: name,
+            blogs:{
+              connect: { id: blog.id }
+            }
+            },
+        })
+      });
+      await Promise.all(createTags);
+
       return { blog };
     });
+
     return c.json(
       {
-        transactionResult,
+        createBlogPost,
       },
       Status.success
     );
@@ -291,29 +320,38 @@ app.put("/posts/:id", userMiddleware, async (c) => {
         Status.notfound
       );
     }
-    const blogTags = blogPost.tag
-    const tagss = blogTags.map(value=>{return value.id})
+    const blogTags = blogPost.tag;
+    const tagss = blogTags.map((value) => {
+      return value.tag;
+    });
+    console.log(tagss)
+    console.log(tags)
 
-    const updateBlogTransaction = await prisma.$transaction(async()=>{
-      
-      const blogTag = await prisma.tags.update({
-        where: { id: tagss[0] },
-        data: {tag:tags}
-      })
-      const blog = await prisma.blog.update({
-        where: { id: postId },
-        data: {
-          title,
-          body,
-        },
-        include:{
-          tag:true
+    const tagsToRemove = tagss.filter(tag=>!tags.includes(tag))
+    const tagsToAdd = tags.filter((tag:string)=>!tagss.includes(tag))
+    console.log(tagsToAdd, tagsToRemove)
+    const tagsExisting = tagss.filter(tag=>tags.includes(tag))
+
+    const updateBlogPost = await prisma.blog.update({
+      where: { id: blogPost.id },
+      data: {
+        title,
+        body,
+        tag:{
+          disconnect: tagsToRemove.map((name:string)=>({tag:name})),
+          connectOrCreate: tagsToAdd.map((name:string)=>({
+            where:{tag:name},
+            create:{tag:name},
+          }))
+          
         }
-      });
-      return {blog}
+      },
+      include:{
+        tag:true
+      }
     })
+    return c.json(updateBlogPost,Status.success)
     
-    return c.json(updateBlogTransaction, Status.success);
   } catch (error) {
     return c.json(
       {
